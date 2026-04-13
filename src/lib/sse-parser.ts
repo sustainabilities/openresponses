@@ -66,6 +66,46 @@ export interface SSEParseResult {
   finalResponse: z.infer<typeof responseResourceSchema> | null;
 }
 
+const getEventType = (data: unknown) => {
+  if (data && typeof data === "object" && "type" in data) {
+    const type = (data as { type?: unknown }).type;
+    if (typeof type === "string") return type;
+  }
+  return "unknown";
+};
+
+export function parseStreamingEventData(
+  data: unknown,
+  eventName?: string,
+): ParsedEvent {
+  const validationResult = streamingEventSchema.safeParse(data);
+  return {
+    event: eventName || getEventType(data),
+    data,
+    validationResult,
+  };
+}
+
+export function getTerminalResponse(
+  data: unknown,
+): z.infer<typeof responseResourceSchema> | null {
+  if (!data || typeof data !== "object") return null;
+
+  const event = data as {
+    type?: unknown;
+    response?: z.infer<typeof responseResourceSchema>;
+  };
+  if (
+    event.type === "response.completed" ||
+    event.type === "response.failed" ||
+    event.type === "response.incomplete"
+  ) {
+    return event.response ?? null;
+  }
+
+  return null;
+}
+
 export async function parseSSEStream(
   response: Response,
 ): Promise<SSEParseResult> {
@@ -104,26 +144,16 @@ export async function parseSSEStream(
           } else {
             try {
               const parsed = JSON.parse(currentData);
-              const validationResult = streamingEventSchema.safeParse(parsed);
+              const parsedEvent = parseStreamingEventData(parsed, currentEvent);
+              events.push(parsedEvent);
 
-              events.push({
-                event: currentEvent || parsed.type || "unknown",
-                data: parsed,
-                validationResult,
-              });
-
-              if (!validationResult.success) {
+              if (!parsedEvent.validationResult.success) {
                 errors.push(
-                  `Event validation failed for ${parsed.type || "unknown"}: ${JSON.stringify(validationResult.error.issues)}`,
+                  `Event validation failed for ${parsedEvent.event}: ${JSON.stringify(parsedEvent.validationResult.error.issues)}`,
                 );
               }
 
-              if (
-                parsed.type === "response.completed" ||
-                parsed.type === "response.failed"
-              ) {
-                finalResponse = parsed.response;
-              }
+              finalResponse = getTerminalResponse(parsed) ?? finalResponse;
             } catch {
               errors.push(`Failed to parse event data: ${currentData}`);
             }

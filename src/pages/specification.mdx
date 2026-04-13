@@ -94,6 +94,61 @@ event: response.output_text.delta
 data: { "type":"response.output_text.delta","sequence_number":10,"item_id":"msg_07315d23576898080068e95daa2e34819685fb0a98a0503f78","output_index":0,"content_index":0,"delta":" a","logprobs":[],"obfuscation":"Wd6S45xQ7SyQLT"}
 ```
 
+## WebSocket Transport
+
+Servers MAY expose the Responses API over a persistent WebSocket connection at the same `/v1/responses` resource. A WebSocket connection is a transport mode for the Responses API; it does not define a separate response object model.
+
+Clients start each turn by sending a JSON object with `type: "response.create"`. The remaining fields follow the standard response creation request body, except transport-specific HTTP fields such as `stream`, `stream_options`, and `background` MUST NOT be sent on WebSocket requests. Servers MUST treat a WebSocket `response.create` message as a request to create a response on the active connection.
+
+```json
+{
+  "type": "response.create",
+  "model": "gpt-openresponses-1",
+  "store": false,
+  "input": [
+    {
+      "type": "message",
+      "role": "user",
+      "content": "Find the bug in fizz_buzz()."
+    }
+  ],
+  "tools": []
+}
+```
+
+Servers MUST send response progress over the WebSocket using the same streaming event objects defined for streaming HTTP responses. Event ordering, `sequence_number`, output item lifecycle, content part lifecycle, and terminal response events have the same meaning on both transports.
+
+A single WebSocket connection MUST process at most one in-flight response at a time. Servers MAY accept multiple `response.create` messages over one connection, but they MUST process those messages sequentially unless they document a provider-specific multiplexing extension.
+
+### WebSocket Continuation
+
+WebSocket continuation uses the same `previous_response_id` semantics as HTTP. A follow-up `response.create` message SHOULD include only new input items, such as tool outputs and the next user message, plus the `previous_response_id` of the prior response.
+
+Servers MAY keep connection-local response state to make continuation lower latency. If the referenced response is not available from connection-local or persisted state, the server MUST fail the turn with an error whose code is `previous_response_not_found`.
+
+```json
+{
+  "type": "response.create",
+  "model": "gpt-openresponses-1",
+  "store": false,
+  "previous_response_id": "resp_123",
+  "input": [
+    {
+      "type": "function_call_output",
+      "call_id": "call_123",
+      "output": "tool result"
+    },
+    {
+      "type": "message",
+      "role": "user",
+      "content": "Now optimize it."
+    }
+  ]
+}
+```
+
+Clients MAY send `generate: false` on `response.create` to prepare request state without asking the model to produce output. A warmup request MUST return a response ID that can be used as `previous_response_id` in a later `response.create` message.
+
 ## Items
 
 Items are the core unit of context in Open Responses. Open Responses defines a few types of items that are common to all providers, such as `message` or `function_call`, and defines how to define additional, provider-specific item types. There are some general principles that apply to all items:

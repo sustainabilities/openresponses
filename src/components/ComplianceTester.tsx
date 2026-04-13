@@ -18,6 +18,7 @@ export default function ComplianceTester({ defaultApiKey = "" }: Props) {
     authHeaderName: "Authorization",
     useBearerPrefix: true,
     model: "gpt-4o-mini",
+    runtime: "browser",
   });
 
   const [results, setResults] = useState<Map<string, TestResult>>(new Map());
@@ -28,14 +29,16 @@ export default function ComplianceTester({ defaultApiKey = "" }: Props) {
     setIsRunning(true);
     setResults(new Map());
 
-    // Initialize all tests as pending
+    // Initialize browser-unsupported tests as CLI-only instead of pending.
     const initialResults = new Map<string, TestResult>();
     testTemplates.forEach((test) => {
+      const unsupportedReason = test.unsupportedReason?.(config);
       initialResults.set(test.id, {
         id: test.id,
         name: test.name,
         description: test.description,
-        status: "pending",
+        status: unsupportedReason ? "skipped" : "pending",
+        errors: unsupportedReason ? [unsupportedReason] : undefined,
       });
     });
     setResults(initialResults);
@@ -73,6 +76,12 @@ export default function ComplianceTester({ defaultApiKey = "" }: Props) {
         return <span className="text-green-600">✓</span>;
       case "failed":
         return <span className="text-red-600">✗</span>;
+      case "skipped":
+        return (
+          <span className="rounded border border-stone-300 px-1.5 py-0.5 font-mono text-xs text-stone-500">
+            CLI
+          </span>
+        );
     }
   };
 
@@ -86,6 +95,8 @@ export default function ComplianceTester({ defaultApiKey = "" }: Props) {
         return "border-green-500/50";
       case "failed":
         return "border-red-500/50";
+      case "skipped":
+        return "border-stone-300";
     }
   };
 
@@ -95,7 +106,14 @@ export default function ComplianceTester({ defaultApiKey = "" }: Props) {
   const failedCount = Array.from(results.values()).filter(
     (r) => r.status === "failed",
   ).length;
-  const totalTests = testTemplates.length;
+  const cliOnlyCount = testTemplates.filter((test) =>
+    test.unsupportedReason?.(config),
+  ).length;
+  const runnableTests = testTemplates.length - cliOnlyCount;
+  const skippedCount = Array.from(results.values()).filter(
+    (r) => r.status === "skipped",
+  ).length;
+  const otherSkippedCount = Math.max(0, skippedCount - cliOnlyCount);
 
   return (
     <div className="space-y-8">
@@ -221,7 +239,17 @@ export default function ComplianceTester({ defaultApiKey = "" }: Props) {
               {" · "}
               <span className="text-red-600">{failedCount} failed</span>
               {" · "}
-              <span className="text-stone-500">{totalTests} total</span>
+              <span className="text-stone-500">{runnableTests} runnable</span>
+              {" · "}
+              <span className="text-stone-500">{cliOnlyCount} CLI-only</span>
+              {otherSkippedCount > 0 && (
+                <>
+                  {" · "}
+                  <span className="text-stone-500">
+                    {otherSkippedCount} skipped
+                  </span>
+                </>
+              )}
             </div>
           )}
         </div>
@@ -235,11 +263,17 @@ export default function ComplianceTester({ defaultApiKey = "" }: Props) {
 
         <div className="space-y-3">
           {testTemplates.map((test) => {
+            const isCliOnly = Boolean(test.unsupportedReason?.(config));
             const result = results.get(test.id) || {
               id: test.id,
               name: test.name,
               description: test.description,
-              status: "pending" as const,
+              status: isCliOnly ? ("skipped" as const) : ("pending" as const),
+              errors: isCliOnly
+                ? [test.unsupportedReason?.(config)].filter(
+                    (error): error is string => Boolean(error),
+                  )
+                : undefined,
             };
             const isExpanded = expandedTests.has(test.id);
 
@@ -285,14 +319,24 @@ export default function ComplianceTester({ defaultApiKey = "" }: Props) {
                   <div className="border-t border-stone-200 px-5 pb-4">
                     {result.errors && result.errors.length > 0 && (
                       <div className="mt-4">
-                        <h4 className="mb-2 text-sm font-medium text-red-600">
-                          Errors
+                        <h4
+                          className={`mb-2 text-sm font-medium ${
+                            result.status === "skipped"
+                              ? "text-stone-700"
+                              : "text-red-600"
+                          }`}
+                        >
+                          {result.status === "skipped" ? "Reason" : "Errors"}
                         </h4>
                         <ul className="space-y-1">
                           {result.errors.map((error) => (
                             <li
                               key={error}
-                              className="rounded border border-red-200 bg-red-50 px-3 py-2 font-mono text-sm text-red-700"
+                              className={`rounded border px-3 py-2 font-mono text-sm ${
+                                result.status === "skipped"
+                                  ? "border-stone-200 bg-stone-50 text-stone-700"
+                                  : "border-red-200 bg-red-50 text-red-700"
+                              }`}
                             >
                               {error}
                             </li>
@@ -329,6 +373,16 @@ export default function ComplianceTester({ defaultApiKey = "" }: Props) {
                       <p className="mt-4 text-sm text-stone-500 italic">
                         Test has not been run yet
                       </p>
+                    )}
+                    {result.status === "skipped" && (
+                      <div className="mt-4 rounded border border-stone-200 bg-stone-50 px-3 py-2 text-sm text-stone-600">
+                        Run this test from the CLI:
+                        <pre className="mt-2 overflow-x-auto font-mono text-xs">
+                          {
+                            "bun run test:compliance --base-url https://api.openai.com/v1 --filter websocket-response"
+                          }
+                        </pre>
+                      </div>
                     )}
                   </div>
                 )}

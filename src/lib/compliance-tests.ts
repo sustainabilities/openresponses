@@ -1,10 +1,18 @@
 import type { z } from "zod";
 import type { createResponseBodySchema } from "../generated/kubb/zod/createResponseBodySchema";
 import { responseResourceSchema } from "../generated/kubb/zod/responseResourceSchema";
-import { parseSSEStream, type SSEParseResult } from "./sse-parser";
+import {
+  getTerminalResponse,
+  parseSSEStream,
+  parseStreamingEventData,
+  type SSEParseResult,
+} from "./sse-parser";
 
 type ResponseResource = z.infer<typeof responseResourceSchema>;
 type CreateResponseBody = z.infer<typeof createResponseBodySchema>;
+type TestRequestBody = CreateResponseBody & Record<string, unknown>;
+type TestTransport = "http" | "websocket";
+type TestStatus = "pending" | "running" | "passed" | "failed" | "skipped";
 
 export interface TestConfig {
   baseUrl: string;
@@ -12,13 +20,14 @@ export interface TestConfig {
   authHeaderName: string;
   useBearerPrefix: boolean;
   model: string;
+  runtime?: "browser" | "server";
 }
 
 export interface TestResult {
   id: string;
   name: string;
   description: string;
-  status: "pending" | "running" | "passed" | "failed";
+  status: TestStatus;
   duration?: number;
   request?: unknown;
   response?: unknown;
@@ -29,6 +38,7 @@ export interface TestResult {
 interface ValidatorContext {
   streaming: boolean;
   sseResult?: SSEParseResult;
+  transport: TestTransport;
 }
 
 type ResponseValidator = (
@@ -40,9 +50,11 @@ export interface TestTemplate {
   id: string;
   name: string;
   description: string;
-  getRequest: (config: TestConfig) => CreateResponseBody;
+  transport?: TestTransport;
+  getRequest: (config: TestConfig) => TestRequestBody;
   streaming?: boolean;
   validators: ResponseValidator[];
+  unsupportedReason?: (config: TestConfig) => string | null;
 }
 
 const hasOutput: ResponseValidator = (response) => {
@@ -82,6 +94,13 @@ const streamingSchema: ResponseValidator = (_, context) => {
   return context.sseResult.errors;
 };
 
+const webSocketBrowserUnsupported = (config: TestConfig) => {
+  if (config.runtime === "browser") {
+    return "WebSocket compliance tests require a server-side runtime because browsers cannot set the required authorization header.";
+  }
+  return null;
+};
+
 export const testTemplates: TestTemplate[] = [
   {
     id: "basic-response",
@@ -108,6 +127,22 @@ export const testTemplates: TestTemplate[] = [
     getRequest: (config) => ({
       model: config.model,
       input: [{ type: "message", role: "user", content: "Count from 1 to 5." }],
+    }),
+    validators: [streamingEvents, streamingSchema, completedStatus],
+  },
+
+  {
+    id: "websocket-response",
+    name: "WebSocket Response",
+    description:
+      "Creates a response over WebSocket and validates returned streaming events",
+    transport: "websocket",
+    streaming: true,
+    unsupportedReason: webSocketBrowserUnsupported,
+    getRequest: (config) => ({
+      type: "response.create",
+      model: config.model,
+      input: [{ type: "message", role: "user", content: "Count from 1 to 3." }],
     }),
     validators: [streamingEvents, streamingSchema, completedStatus],
   },
@@ -214,7 +249,7 @@ export const testTemplates: TestTemplate[] = [
 
 async function makeRequest(
   config: TestConfig,
-  body: CreateResponseBody,
+  body: TestRequestBody,
   streaming = false,
 ): Promise<Response> {
   const authValue = config.useBearerPrefix
@@ -231,15 +266,227 @@ async function makeRequest(
   });
 }
 
+function toWebSocketUrl(baseUrl: string) {
+  const responseUrl = new URL(`${baseUrl.replace(/\/$/, "")}/responses`);
+
+  if (responseUrl.protocol === "https:") {
+    responseUrl.protocol = "wss:";
+  } else if (responseUrl.protocol === "http:") {
+    responseUrl.protocol = "ws:";
+  } else if (
+    responseUrl.protocol !== "ws:" &&
+    responseUrl.protocol !== "wss:"
+  ) {
+    throw new Error(
+      `Unsupported base URL protocol for WebSocket: ${responseUrl.protocol}`,
+    );
+  }
+
+  return responseUrl.toString();
+}
+
+async function makeWebSocketRequest(
+  config: TestConfig,
+  body: TestRequestBody,
+): Promise<SSEParseResult> {
+  const authValue = config.useBearerPrefix
+    ? `Bearer ${config.apiKey}`
+    : config.apiKey;
+
+  return new Promise((resolve, reject) => {
+    const events: SSEParseResult["events"] = [];
+    const errors: string[] = [];
+    let finalResponse: ResponseResource | null = null;
+    let timeout: ReturnType<typeof setTimeout> | null = null;
+    let ws: WebSocket | null = null;
+    let settled = false;
+
+    const clearPendingTimeout = () => {
+      if (timeout) {
+        clearTimeout(timeout);
+        timeout = null;
+      }
+    };
+
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearPendingTimeout();
+      try {
+        ws?.close();
+      } catch {
+        // Ignore close errors after a terminal event.
+      }
+      resolve({ events, errors, finalResponse });
+    };
+
+    const fail = (error: Error) => {
+      if (settled) return;
+      settled = true;
+      clearPendingTimeout();
+      try {
+        ws?.close();
+      } catch {
+        // Ignore close errors while rejecting the request.
+      }
+      reject(error);
+    };
+
+    const messageDataToString = (data: MessageEvent["data"]) => {
+      if (typeof data === "string") return data;
+      if (data instanceof ArrayBuffer) return new TextDecoder().decode(data);
+      if (ArrayBuffer.isView(data)) {
+        return new TextDecoder().decode(data);
+      }
+      return String(data);
+    };
+
+    timeout = setTimeout(() => {
+      errors.push("Timed out waiting for terminal WebSocket response event");
+      finish();
+    }, 30000);
+
+    try {
+      type WebSocketConstructorWithHeaders = new (
+        url: string | URL,
+        options?: { headers?: Record<string, string> },
+      ) => WebSocket;
+      // Bun supports headers for client WebSockets; browser runs skip this path.
+      const WebSocketWithHeaders =
+        WebSocket as unknown as WebSocketConstructorWithHeaders;
+
+      ws = new WebSocketWithHeaders(toWebSocketUrl(config.baseUrl), {
+        headers: {
+          "Content-Type": "application/json",
+          [config.authHeaderName]: authValue,
+        },
+      });
+    } catch (error) {
+      fail(error instanceof Error ? error : new Error(String(error)));
+      return;
+    }
+
+    ws.addEventListener("open", () => {
+      ws.send(JSON.stringify(body));
+    });
+
+    ws.addEventListener("message", (message) => {
+      const data = messageDataToString(message.data);
+      if (data === "[DONE]") {
+        finish();
+        return;
+      }
+
+      try {
+        const parsed = JSON.parse(data);
+        const parsedEvent = parseStreamingEventData(parsed);
+        events.push(parsedEvent);
+
+        if (!parsedEvent.validationResult.success) {
+          errors.push(
+            `Event validation failed for ${parsedEvent.event}: ${JSON.stringify(parsedEvent.validationResult.error.issues)}`,
+          );
+        }
+
+        const terminalResponse = getTerminalResponse(parsed);
+        if (terminalResponse) {
+          finalResponse = terminalResponse;
+          finish();
+          return;
+        }
+
+        if (parsedEvent.event === "error") {
+          errors.push(`WebSocket error event: ${JSON.stringify(parsed)}`);
+          finish();
+        }
+      } catch {
+        errors.push(`Failed to parse WebSocket event data: ${data}`);
+      }
+    });
+
+    ws.addEventListener("error", () => {
+      fail(new Error("WebSocket connection failed"));
+    });
+
+    ws.addEventListener("close", () => {
+      if (!settled && !finalResponse) {
+        errors.push("WebSocket closed before a terminal response event");
+      }
+      finish();
+    });
+  });
+}
+
 async function runTest(
   template: TestTemplate,
   config: TestConfig,
 ): Promise<TestResult> {
   const startTime = Date.now();
-  const requestBody = template.getRequest(config);
   const streaming = template.streaming ?? false;
+  const transport = template.transport ?? "http";
+
+  const unsupportedReason = template.unsupportedReason?.(config);
+  if (unsupportedReason) {
+    return {
+      id: template.id,
+      name: template.name,
+      description: template.description,
+      status: "skipped",
+      duration: 0,
+      errors: [unsupportedReason],
+    };
+  }
+
+  const requestBody = template.getRequest(config);
 
   try {
+    if (transport === "websocket") {
+      const sseResult = await makeWebSocketRequest(config, requestBody);
+      const duration = Date.now() - startTime;
+      const rawData = sseResult.finalResponse;
+
+      const parseResult = responseResourceSchema.safeParse(rawData);
+      if (!parseResult.success) {
+        return {
+          id: template.id,
+          name: template.name,
+          description: template.description,
+          status: "failed",
+          duration,
+          request: requestBody,
+          response: rawData,
+          errors: [
+            ...sseResult.errors,
+            ...parseResult.error.issues.map(
+              (issue) => `${issue.path.join(".")}: ${issue.message}`,
+            ),
+          ],
+          streamEvents: sseResult.events.length,
+        };
+      }
+
+      const context: ValidatorContext = {
+        streaming,
+        sseResult,
+        transport,
+      };
+      const errors = template.validators.flatMap((v) =>
+        v(parseResult.data, context),
+      );
+
+      return {
+        id: template.id,
+        name: template.name,
+        description: template.description,
+        status: errors.length === 0 ? "passed" : "failed",
+        duration,
+        request: requestBody,
+        response: parseResult.data,
+        errors,
+        streamEvents: sseResult.events.length,
+      };
+    }
+
     const response = await makeRequest(config, requestBody, streaming);
     const duration = Date.now() - startTime;
 
@@ -286,7 +533,7 @@ async function runTest(
     }
 
     // Run semantic validators on typed data
-    const context: ValidatorContext = { streaming, sseResult };
+    const context: ValidatorContext = { streaming, sseResult, transport };
     const errors = template.validators.flatMap((v) =>
       v(parseResult.data, context),
     );
@@ -318,8 +565,23 @@ async function runTest(
 export async function runAllTests(
   config: TestConfig,
   onProgress: (result: TestResult) => void,
+  templates = testTemplates,
 ): Promise<TestResult[]> {
-  const promises = testTemplates.map(async (template) => {
+  const promises = templates.map(async (template) => {
+    const unsupportedReason = template.unsupportedReason?.(config);
+    if (unsupportedReason) {
+      const result: TestResult = {
+        id: template.id,
+        name: template.name,
+        description: template.description,
+        status: "skipped",
+        duration: 0,
+        errors: [unsupportedReason],
+      };
+      onProgress(result);
+      return result;
+    }
+
     onProgress({
       id: template.id,
       name: template.name,

@@ -23,6 +23,9 @@ type WebSocketTurnResult = SSEParseResult & {
 type WebSocketRequestStep =
   | TestRequestBody
   | ((previousTurns: WebSocketTurnResult[]) => TestRequestBody);
+interface WebSocketSessionOptions {
+  validateRequests?: boolean;
+}
 
 export interface TestConfig {
   baseUrl: string;
@@ -144,7 +147,9 @@ const getTurnErrorCode = (turn: WebSocketTurnResult | undefined) =>
   turn?.errorCode ?? getResponseErrorCode(turn?.finalResponse);
 
 const isFailedTurn = (turn: WebSocketTurnResult | undefined) =>
-  Boolean(getTurnErrorCode(turn)) || turn?.finalResponse?.status === "failed";
+  Boolean(turn?.errorEvent) ||
+  Boolean(getTurnErrorCode(turn)) ||
+  turn?.finalResponse?.status === "failed";
 
 function createResponseResult(
   template: TestTemplate,
@@ -290,6 +295,24 @@ export const testTemplates: TestTemplate[] = [
   },
 
   {
+    id: "websocket-reconnect-store-false-recovery",
+    name: "WebSocket Store False Reconnect Recovery",
+    description:
+      "Creates a store:false response, reconnects on a new WebSocket, validates previous_response_not_found, then starts a clean recovery response",
+    transport: "websocket",
+    streaming: true,
+    unsupportedReason: webSocketBrowserUnsupported,
+    getRequest: (config) => ({
+      type: "response.create",
+      model: config.model,
+      store: false,
+      input: "Remember the code word: copper. Reply with OK.",
+    }),
+    validators: [],
+    run: runWebSocketReconnectStoreFalseRecoveryTest,
+  },
+
+  {
     id: "websocket-generate-false",
     name: "WebSocket Generate False",
     description:
@@ -343,6 +366,24 @@ export const testTemplates: TestTemplate[] = [
     }),
     validators: [],
     run: runWebSocketFailedContinuationEvictsCacheTest,
+  },
+
+  {
+    id: "websocket-compact-new-chain",
+    name: "WebSocket Compact New Chain",
+    description:
+      "Uses /responses/compact output as the base input for a new WebSocket response without previous_response_id",
+    transport: "websocket",
+    streaming: true,
+    unsupportedReason: webSocketBrowserUnsupported,
+    getRequest: (config) => ({
+      type: "response.create",
+      model: config.model,
+      store: false,
+      input: "This seed request only validates the WebSocket schema.",
+    }),
+    validators: [streamingEvents, streamingSchema, completedStatus],
+    run: runWebSocketCompactNewChainTest,
   },
 
   {
@@ -496,6 +537,7 @@ function createEmptyWebSocketTurn(): WebSocketTurnResult {
 async function makeWebSocketSession(
   config: TestConfig,
   steps: WebSocketRequestStep[],
+  options: WebSocketSessionOptions = {},
 ): Promise<WebSocketTurnResult[]> {
   const authValue = config.useBearerPrefix
     ? `Bearer ${config.apiKey}`
@@ -570,16 +612,18 @@ async function makeWebSocketSession(
         fail(error instanceof Error ? error : new Error(String(error)));
         return;
       }
-      const requestValidationErrors = validateWebSocketCreateEvent(body);
-      if (requestValidationErrors.length > 0) {
-        fail(
-          new Error(
-            requestValidationErrors
-              .map((error) => `Request ${turnIndex + 1}: ${error}`)
-              .join("\n"),
-          ),
-        );
-        return;
+      if (options.validateRequests !== false) {
+        const requestValidationErrors = validateWebSocketCreateEvent(body);
+        if (requestValidationErrors.length > 0) {
+          fail(
+            new Error(
+              requestValidationErrors
+                .map((error) => `Request ${turnIndex + 1}: ${error}`)
+                .join("\n"),
+            ),
+          );
+          return;
+        }
       }
       turn.request = body;
       armTimeout();
@@ -699,6 +743,54 @@ async function makeWebSocketRequest(
 ): Promise<SSEParseResult> {
   const [result] = await makeWebSocketSession(config, [body]);
   return result;
+}
+
+async function makeCompactRequest(
+  config: TestConfig,
+  body: Record<string, unknown>,
+): Promise<Response> {
+  const authValue = config.useBearerPrefix
+    ? `Bearer ${config.apiKey}`
+    : config.apiKey;
+
+  return fetch(`${config.baseUrl.replace(/\/$/, "")}/responses/compact`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      [config.authHeaderName]: authValue,
+    },
+    body: JSON.stringify(body),
+  });
+}
+
+async function readResponseBody(response: Response): Promise<unknown> {
+  const text = await response.text();
+  if (!text) return "";
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
+}
+
+function getCompactedOutput(response: unknown): {
+  output: unknown[];
+  errors: string[];
+} {
+  if (!response || typeof response !== "object") {
+    return { output: [], errors: ["Compaction response was not an object"] };
+  }
+
+  const output = (response as { output?: unknown }).output;
+  if (!Array.isArray(output)) {
+    return {
+      output: [],
+      errors: ["Compaction response did not include an output array"],
+    };
+  }
+
+  return { output, errors: [] };
 }
 
 async function runWebSocketSequentialResponsesTest(
@@ -824,6 +916,121 @@ async function runWebSocketContinuationTest(
       request: [firstTurn.request, secondTurn.request],
       response: [firstTurn.finalResponse, secondTurn.finalResponse],
       streamEvents: firstTurn.events.length + secondTurn.events.length,
+    };
+  } catch (error) {
+    return {
+      id: template.id,
+      name: template.name,
+      description: template.description,
+      status: "failed",
+      duration: Date.now() - startTime,
+      request: firstRequest,
+      errors: [error instanceof Error ? error.message : String(error)],
+    };
+  }
+}
+
+async function runWebSocketReconnectStoreFalseRecoveryTest(
+  config: TestConfig,
+  template: TestTemplate,
+): Promise<TestResult> {
+  const startTime = Date.now();
+  const firstRequest = template.getRequest(config);
+
+  try {
+    const [firstTurn] = await makeWebSocketSession(config, [firstRequest]);
+    const firstErrors = [
+      ...firstTurn.errors,
+      ...hasResponseId(firstTurn.finalResponse),
+    ];
+    const previousResponseId = firstTurn.finalResponse?.id;
+
+    if (firstErrors.length > 0 || !previousResponseId) {
+      return {
+        id: template.id,
+        name: template.name,
+        description: template.description,
+        status: "failed",
+        duration: Date.now() - startTime,
+        request: firstRequest,
+        response: firstTurn.finalResponse,
+        errors: firstErrors,
+        streamEvents: firstTurn.events.length,
+      };
+    }
+
+    const reconnectRequest: TestRequestBody = {
+      type: "response.create",
+      model: config.model,
+      store: false,
+      previous_response_id: previousResponseId,
+      input: "Try to continue after reconnect. Reply with exactly: reconnected",
+    };
+    const recoveryRequest: TestRequestBody = {
+      type: "response.create",
+      model: config.model,
+      store: false,
+      input: [
+        {
+          type: "message",
+          role: "user",
+          content:
+            "The previous store:false chain could not continue after reconnect. Start a new response and reply with exactly: recovered",
+        },
+      ],
+    };
+    const [reconnectTurn, recoveryTurn] = await makeWebSocketSession(config, [
+      reconnectRequest,
+      recoveryRequest,
+    ]);
+    const reconnectErrorCode = getTurnErrorCode(reconnectTurn);
+    const errors = [...reconnectTurn.errors];
+
+    if (reconnectErrorCode !== "previous_response_not_found") {
+      errors.push(
+        `Expected previous_response_not_found after reconnecting a store:false chain but got ${reconnectErrorCode ?? "no error code"}`,
+      );
+    }
+    if (!recoveryTurn) {
+      errors.push("Recovery WebSocket turn did not run after reconnect miss");
+    } else {
+      const recoveryResult = createResponseResult(
+        template,
+        recoveryRequest,
+        recoveryTurn.finalResponse,
+        recoveryTurn,
+        startTime,
+        { streaming: true, sseResult: recoveryTurn, transport: "websocket" },
+      );
+      errors.push(...(recoveryResult.errors ?? []));
+      if ("previous_response_id" in recoveryRequest) {
+        errors.push(
+          "Reconnect recovery must start a new response without previous_response_id",
+        );
+      }
+    }
+
+    return {
+      id: template.id,
+      name: template.name,
+      description: template.description,
+      status: errors.length === 0 ? "passed" : "failed",
+      duration: Date.now() - startTime,
+      request: [
+        firstTurn.request,
+        reconnectTurn.request,
+        recoveryTurn?.request,
+      ],
+      response: [
+        firstTurn.finalResponse,
+        reconnectTurn.errorEvent ?? reconnectTurn.finalResponse,
+        recoveryTurn?.finalResponse,
+      ],
+      errors,
+      streamEvents:
+        firstTurn.events.length +
+        reconnectTurn.events.length +
+        (recoveryTurn?.events.length ?? 0),
     };
   } catch (error) {
     return {
@@ -1018,13 +1225,11 @@ async function runWebSocketFailedContinuationEvictsCacheTest(
 
     if (!failedTurn) {
       errors.push("Failed WebSocket continuation turn did not run");
-    } else {
+    } else if (!isFailedTurn(failedTurn)) {
       errors.push(...failedTurn.errors);
-      if (!isFailedTurn(failedTurn)) {
-        errors.push(
-          `Expected second WebSocket continuation turn to fail but got status ${failedTurn.finalResponse?.status ?? "no terminal response"}`,
-        );
-      }
+      errors.push(
+        `Expected second WebSocket continuation turn to fail but got status ${failedTurn.finalResponse?.status ?? "no terminal response"}`,
+      );
     }
 
     const retryErrorCode = getTurnErrorCode(retryTurn);
@@ -1065,6 +1270,145 @@ async function runWebSocketFailedContinuationEvictsCacheTest(
       status: "failed",
       duration: Date.now() - startTime,
       request: firstRequest,
+      errors: [error instanceof Error ? error.message : String(error)],
+    };
+  }
+}
+
+async function runWebSocketCompactNewChainTest(
+  config: TestConfig,
+  template: TestTemplate,
+): Promise<TestResult> {
+  const startTime = Date.now();
+  const compactRequest = {
+    model: config.model,
+    input: [
+      {
+        type: "message",
+        role: "user",
+        content: [
+          {
+            type: "input_text",
+            text: "Remember the compaction code word: slate.",
+          },
+        ],
+      },
+      {
+        type: "message",
+        role: "assistant",
+        content: [
+          {
+            type: "output_text",
+            text: "OK.",
+          },
+        ],
+      },
+      {
+        type: "message",
+        role: "user",
+        content: [
+          {
+            type: "input_text",
+            text: "Compress this conversation for later continuation.",
+          },
+        ],
+      },
+    ],
+  };
+
+  try {
+    const compactResponse = await makeCompactRequest(config, compactRequest);
+    const compactBody = await readResponseBody(compactResponse);
+    if (!compactResponse.ok) {
+      return {
+        id: template.id,
+        name: template.name,
+        description: template.description,
+        status: "failed",
+        duration: Date.now() - startTime,
+        request: compactRequest,
+        response: compactBody,
+        errors: [
+          `HTTP ${compactResponse.status} from /responses/compact: ${JSON.stringify(compactBody)}`,
+        ],
+      };
+    }
+
+    const { output, errors: compactErrors } = getCompactedOutput(compactBody);
+    if (compactErrors.length > 0) {
+      return {
+        id: template.id,
+        name: template.name,
+        description: template.description,
+        status: "failed",
+        duration: Date.now() - startTime,
+        request: compactRequest,
+        response: compactBody,
+        errors: compactErrors,
+      };
+    }
+
+    const websocketRequest = {
+      type: "response.create",
+      model: config.model,
+      store: false,
+      input: [
+        ...output,
+        {
+          type: "message",
+          role: "user",
+          content: "Continue from here. Reply with exactly: compacted",
+        },
+      ],
+      tools: [],
+    } as TestRequestBody;
+
+    const [turn] = await makeWebSocketSession(
+      config,
+      [websocketRequest],
+      // The compacted window is provider-generated and the guide requires
+      // passing it back as-is, so preflight validation cannot assume a static
+      // input schema for those returned items.
+      { validateRequests: false },
+    );
+    const websocketResult = createResponseResult(
+      template,
+      websocketRequest,
+      turn.finalResponse,
+      turn,
+      startTime,
+      { streaming: true, sseResult: turn, transport: "websocket" },
+    );
+    const errors = [...(websocketResult.errors ?? [])];
+
+    if ("previous_response_id" in websocketRequest) {
+      errors.push(
+        "Standalone compact recovery must start a new chain without previous_response_id",
+      );
+    }
+
+    return {
+      ...websocketResult,
+      status: errors.length === 0 ? "passed" : "failed",
+      request: {
+        compact: compactRequest,
+        websocket: turn.request,
+      },
+      response: {
+        compact: compactBody,
+        websocket: turn.finalResponse,
+      },
+      errors,
+      streamEvents: turn.events.length,
+    };
+  } catch (error) {
+    return {
+      id: template.id,
+      name: template.name,
+      description: template.description,
+      status: "failed",
+      duration: Date.now() - startTime,
+      request: compactRequest,
       errors: [error instanceof Error ? error.message : String(error)],
     };
   }

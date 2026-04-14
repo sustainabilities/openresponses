@@ -8,9 +8,11 @@ const websocketTemplateIds = [
   "websocket-response",
   "websocket-sequential-responses",
   "websocket-continuation",
+  "websocket-reconnect-store-false-recovery",
   "websocket-generate-false",
   "websocket-previous-response-not-found",
   "websocket-failed-continuation-evicts-cache",
+  "websocket-compact-new-chain",
 ];
 
 describe("WebSocket compliance coverage", () => {
@@ -123,6 +125,11 @@ describe("WebSocket compliance coverage", () => {
     ).toBe(true);
     expect(
       parseStreamingEventData(previousResponseNotFound, undefined, {
+        transport: "websocket",
+      }).validationResult.success,
+    ).toBe(true);
+    expect(
+      parseStreamingEventData(connectionLimitReached, undefined, {
         transport: "websocket",
       }).validationResult.success,
     ).toBe(true);

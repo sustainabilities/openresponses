@@ -146,31 +146,33 @@ export default function ComplianceTester({ defaultApiKey = "" }: Props) {
         <button
           type="button"
           onClick={() => toggleExpanded(test.id)}
-          className="flex w-full items-center gap-4 px-5 py-4 text-left transition-colors hover:bg-stone-50"
+          className="grid w-full grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-4 px-5 py-4 text-left transition-colors hover:bg-stone-50"
         >
           <span className="text-xl">{getStatusIcon(result.status)}</span>
           <div className="min-w-0 flex-1">
-            <h3 className="font-mono font-medium text-stone-900">
+            <h3 className="font-mono font-medium break-words text-stone-900">
               {test.name}
             </h3>
-            <p className="truncate text-sm text-stone-600">
+            <p className="mt-1 text-sm leading-6 break-words text-stone-600">
               {test.description}
             </p>
           </div>
-          {result.duration && (
-            <span className="font-mono text-xs text-stone-500">
-              {result.duration}ms
+          <span className="flex shrink-0 items-center gap-3 pt-1">
+            {result.duration && (
+              <span className="font-mono text-xs whitespace-nowrap text-stone-500">
+                {result.duration}ms
+              </span>
+            )}
+            {result.streamEvents !== undefined && (
+              <span className="font-mono text-xs whitespace-nowrap text-stone-500">
+                {result.streamEvents} events
+              </span>
+            )}
+            <span
+              className={`text-stone-400 transition-transform ${isExpanded ? "rotate-180" : ""}`}
+            >
+              ▼
             </span>
-          )}
-          {result.streamEvents !== undefined && (
-            <span className="font-mono text-xs text-stone-500">
-              {result.streamEvents} events
-            </span>
-          )}
-          <span
-            className={`text-stone-400 transition-transform ${isExpanded ? "rotate-180" : ""}`}
-          >
-            ▼
           </span>
         </button>
 

@@ -116,6 +116,8 @@ function getStatusIcon(status: TestResult["status"]): string {
       return colors.green("✓");
     case "failed":
       return colors.red("✗");
+    case "skipped":
+      return colors.gray("○");
     case "running":
       return colors.yellow("◉");
     case "pending":
@@ -132,6 +134,12 @@ function printResult(result: TestResult, verbose: boolean) {
     result.status === "failed" ? colors.red(result.name) : result.name;
 
   console.log(`${icon} ${name}${duration}${events}`);
+
+  if (result.status === "skipped" && result.errors?.length) {
+    for (const error of result.errors) {
+      console.log(`  ${colors.gray("-")} ${colors.gray(error)}`);
+    }
+  }
 
   if (result.status === "failed" && result.errors?.length) {
     for (const error of result.errors) {
@@ -187,6 +195,7 @@ async function main() {
     model: args.model || "gpt-4o-mini",
     authHeaderName: args.authHeader || "Authorization",
     useBearerPrefix: !args.noBearer,
+    runtime: "server",
   };
 
   if (args.filter?.length) {
@@ -224,20 +233,32 @@ async function main() {
     console.log();
   }
 
-  await runAllTests(config, onProgress);
+  const selectedTemplates = args.filter?.length
+    ? testTemplates.filter((template) => args.filter?.includes(template.id))
+    : testTemplates;
+
+  await runAllTests(config, onProgress, selectedTemplates);
 
   const finalResults = allUpdates.filter(
     (r) => r.status === "passed" || r.status === "failed",
   );
   const passed = finalResults.filter((r) => r.status === "passed").length;
   const failed = finalResults.filter((r) => r.status === "failed").length;
+  const skippedResults = allUpdates.filter((r) => r.status === "skipped");
+  const skipped = skippedResults.length;
+  const completedResults = [...finalResults, ...skippedResults];
 
   if (args.json) {
     console.log(
       JSON.stringify(
         {
-          summary: { passed, failed, total: finalResults.length },
-          results: finalResults,
+          summary: {
+            passed,
+            failed,
+            skipped,
+            total: completedResults.length,
+          },
+          results: completedResults,
         },
         null,
         2,
@@ -246,7 +267,7 @@ async function main() {
   } else {
     console.log(`\n${"=".repeat(50)}`);
     console.log(
-      `Results: ${colors.green(`${passed} passed`)}, ${colors.red(`${failed} failed`)}, ${finalResults.length} total`,
+      `Results: ${colors.green(`${passed} passed`)}, ${colors.red(`${failed} failed`)}, ${colors.gray(`${skipped} skipped`)}, ${completedResults.length} total`,
     );
 
     if (failed > 0) {
@@ -260,7 +281,9 @@ async function main() {
         }
       }
     } else {
-      console.log(`\n${colors.green("✓ All tests passed!")}`);
+      const message =
+        skipped > 0 ? "✓ All runnable tests passed!" : "✓ All tests passed!";
+      console.log(`\n${colors.green(message)}`);
     }
   }
 

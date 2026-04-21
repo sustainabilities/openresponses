@@ -2179,7 +2179,14 @@ def main(argv: list[str]) -> int:
                 out_doc = bundler.bundle(entrypoint)
         out_doc = _strip_x_properties(
             out_doc,
-            keep_keys={"x-inlineable", "x-enumDescriptions", "x-unionDisplay", "x-unionTitle"},
+            keep_keys={
+                "x-inlineable",
+                "x-enumDescriptions",
+                "x-unionDisplay",
+                "x-unionTitle",
+                "x-openresponses-websocket",
+                "x-openresponses-disallowed",
+            },
         )
         if args.manifest:
             out_doc = _apply_manifest_filters(out_doc, manifest_path=Path(args.manifest))

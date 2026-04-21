@@ -4,10 +4,10 @@ export { annotationSchema } from "./zod/annotationSchema.ts";
 export { assistantMessageItemParamSchema } from "./zod/assistantMessageItemParamSchema.ts";
 export { createResponseBodySchema } from "./zod/createResponseBodySchema.ts";
 export {
-  createresponse200Schema,
-  createresponseMutationRequestSchema,
-  createresponseMutationResponseSchema,
-} from "./zod/createresponseSchema.ts";
+  createResponse200Schema,
+  createResponseMutationRequestSchema,
+  createResponseMutationResponseSchema,
+} from "./zod/createResponseSchema.ts";
 export { detailEnumSchema } from "./zod/detailEnumSchema.ts";
 export { developerMessageItemParamSchema } from "./zod/developerMessageItemParamSchema.ts";
 export { emptyModelParamSchema } from "./zod/emptyModelParamSchema.ts";
@@ -105,3 +105,5 @@ export { urlCitationParamSchema } from "./zod/urlCitationParamSchema.ts";
 export { usageSchema } from "./zod/usageSchema.ts";
 export { userMessageItemParamSchema } from "./zod/userMessageItemParamSchema.ts";
 export { verbosityEnumSchema } from "./zod/verbosityEnumSchema.ts";
+export { webSocketErrorEventSchema } from "./zod/webSocketErrorEventSchema.ts";
+export { webSocketResponseCreateEventSchema } from "./zod/webSocketResponseCreateEventSchema.ts";

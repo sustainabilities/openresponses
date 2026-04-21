@@ -24,6 +24,7 @@ import { responseReasoningSummaryPartDoneStreamingEventSchema } from "../generat
 import { responseRefusalDeltaStreamingEventSchema } from "../generated/kubb/zod/responseRefusalDeltaStreamingEventSchema";
 import { responseRefusalDoneStreamingEventSchema } from "../generated/kubb/zod/responseRefusalDoneStreamingEventSchema";
 import type { responseResourceSchema } from "../generated/kubb/zod/responseResourceSchema";
+import { webSocketErrorEventSchema } from "../generated/kubb/zod/webSocketErrorEventSchema";
 
 export const streamingEventSchema = z.union([
   responseCreatedStreamingEventSchema,
@@ -51,19 +52,78 @@ export const streamingEventSchema = z.union([
   responseOutputTextAnnotationAddedStreamingEventSchema,
   errorStreamingEventSchema,
 ]);
+export const webSocketStreamingEventSchema = z.union([
+  streamingEventSchema,
+  webSocketErrorEventSchema,
+]);
 
 export type StreamingEvent = z.infer<typeof streamingEventSchema>;
+export type WebSocketStreamingEvent = z.infer<
+  typeof webSocketStreamingEventSchema
+>;
+
+interface ParseStreamingEventOptions {
+  transport?: "http" | "websocket";
+}
 
 export interface ParsedEvent {
   event: string;
   data: unknown;
-  validationResult: z.SafeParseReturnType<unknown, StreamingEvent>;
+  validationResult: z.SafeParseReturnType<
+    unknown,
+    StreamingEvent | WebSocketStreamingEvent
+  >;
 }
 
 export interface SSEParseResult {
   events: ParsedEvent[];
   errors: string[];
   finalResponse: z.infer<typeof responseResourceSchema> | null;
+}
+
+const getEventType = (data: unknown) => {
+  if (data && typeof data === "object" && "type" in data) {
+    const type = (data as { type?: unknown }).type;
+    if (typeof type === "string") return type;
+  }
+  return "unknown";
+};
+
+export function parseStreamingEventData(
+  data: unknown,
+  eventName?: string,
+  options: ParseStreamingEventOptions = {},
+): ParsedEvent {
+  const validationSchema =
+    options.transport === "websocket"
+      ? webSocketStreamingEventSchema
+      : streamingEventSchema;
+  const validationResult = validationSchema.safeParse(data);
+  return {
+    event: eventName || getEventType(data),
+    data,
+    validationResult,
+  };
+}
+
+export function getTerminalResponse(
+  data: unknown,
+): z.infer<typeof responseResourceSchema> | null {
+  if (!data || typeof data !== "object") return null;
+
+  const event = data as {
+    type?: unknown;
+    response?: z.infer<typeof responseResourceSchema>;
+  };
+  if (
+    event.type === "response.completed" ||
+    event.type === "response.failed" ||
+    event.type === "response.incomplete"
+  ) {
+    return event.response ?? null;
+  }
+
+  return null;
 }
 
 export async function parseSSEStream(
@@ -104,26 +164,16 @@ export async function parseSSEStream(
           } else {
             try {
               const parsed = JSON.parse(currentData);
-              const validationResult = streamingEventSchema.safeParse(parsed);
+              const parsedEvent = parseStreamingEventData(parsed, currentEvent);
+              events.push(parsedEvent);
 
-              events.push({
-                event: currentEvent || parsed.type || "unknown",
-                data: parsed,
-                validationResult,
-              });
-
-              if (!validationResult.success) {
+              if (!parsedEvent.validationResult.success) {
                 errors.push(
-                  `Event validation failed for ${parsed.type || "unknown"}: ${JSON.stringify(validationResult.error.issues)}`,
+                  `Event validation failed for ${parsedEvent.event}: ${JSON.stringify(parsedEvent.validationResult.error.issues)}`,
                 );
               }
 
-              if (
-                parsed.type === "response.completed" ||
-                parsed.type === "response.failed"
-              ) {
-                finalResponse = parsed.response;
-              }
+              finalResponse = getTerminalResponse(parsed) ?? finalResponse;
             } catch {
               errors.push(`Failed to parse event data: ${currentData}`);
             }

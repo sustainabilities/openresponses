@@ -4,10 +4,10 @@ export { annotationSchema } from "./annotationSchema.ts";
 export { assistantMessageItemParamSchema } from "./assistantMessageItemParamSchema.ts";
 export { createResponseBodySchema } from "./createResponseBodySchema.ts";
 export {
-  createresponse200Schema,
-  createresponseMutationRequestSchema,
-  createresponseMutationResponseSchema,
-} from "./createresponseSchema.ts";
+  createResponse200Schema,
+  createResponseMutationRequestSchema,
+  createResponseMutationResponseSchema,
+} from "./createResponseSchema.ts";
 export { detailEnumSchema } from "./detailEnumSchema.ts";
 export { developerMessageItemParamSchema } from "./developerMessageItemParamSchema.ts";
 export { emptyModelParamSchema } from "./emptyModelParamSchema.ts";
@@ -105,3 +105,5 @@ export { urlCitationParamSchema } from "./urlCitationParamSchema.ts";
 export { usageSchema } from "./usageSchema.ts";
 export { userMessageItemParamSchema } from "./userMessageItemParamSchema.ts";
 export { verbosityEnumSchema } from "./verbosityEnumSchema.ts";
+export { webSocketErrorEventSchema } from "./webSocketErrorEventSchema.ts";
+export { webSocketResponseCreateEventSchema } from "./webSocketResponseCreateEventSchema.ts";
